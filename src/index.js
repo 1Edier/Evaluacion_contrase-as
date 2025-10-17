@@ -44,7 +44,8 @@ Donde:
 - **0-60 bits**: Débil o Aceptable
 - **60-80 bits**: Fuerte
 - **80+ bits**: Muy Fuerte
-- **Común**: Insegura (encontrada en diccionario de 1M contraseñas)`,
+- **Común**: Insegura (encontrada en diccionario de 1M contraseñas)
+- **Parcialmente común**: Contiene palabras del diccionario`,
       contact: {
         name: 'Soporte API',
         email: 'soporte@ejemplo.com'
@@ -113,14 +114,27 @@ Donde:
             },
             categoria: {
               type: 'string',
-              enum: ['Débil o Aceptable', 'Fuerte', 'Muy Fuerte', 'Insegura (Común)'],
+              enum: ['Débil o Aceptable', 'Fuerte', 'Muy Fuerte', 'Insegura (Común)', 'Insegura (Parcialmente común)'],
               description: 'Categoría de fortaleza',
               example: 'Muy Fuerte'
             },
             en_diccionario: {
               type: 'boolean',
-              description: 'Si está en diccionario de contraseñas comunes',
+              description: 'Si está completamente en el diccionario',
               example: false
+            },
+            parcialmente_en_diccionario: {
+              type: 'boolean',
+              description: 'Si contiene palabras del diccionario',
+              example: false
+            },
+            palabras_encontradas: {
+              type: 'array',
+              items: {
+                type: 'string'
+              },
+              description: 'Palabras del diccionario encontradas',
+              example: []
             },
             tiempo_estimado_crack: {
               type: 'string',
@@ -167,7 +181,8 @@ Donde:
 La API verifica:
 - Longitud de la contraseña (L)
 - Complejidad del alfabeto usado (N)
-- Si está en un diccionario de 1 millón de contraseñas comunes
+- Si está completamente en el diccionario
+- Si contiene palabras parciales del diccionario
 - Tiempo estimado de crackeo (asumiendo 10¹¹ intentos/segundo)`,
           requestBody: {
             required: true,
@@ -194,6 +209,12 @@ La API verifica:
                     value: {
                       password: 'password123'
                     }
+                  },
+                  parcial: {
+                    summary: 'Contraseña parcialmente común',
+                    value: {
+                      password: 'dragon2024!'
+                    }
                   }
                 }
               }
@@ -206,38 +227,6 @@ La API verifica:
                 'application/json': {
                   schema: {
                     $ref: '#/components/schemas/PasswordResponse'
-                  },
-                  examples: {
-                    fuerte: {
-                      summary: 'Resultado de contraseña fuerte',
-                      value: {
-                        password_evaluada: '**************',
-                        resultado: {
-                          longitud: 14,
-                          keyspace: 68,
-                          entropia_bits: 85.22,
-                          entropia_original: null,
-                          categoria: 'Muy Fuerte',
-                          en_diccionario: false,
-                          tiempo_estimado_crack: '143323.75 siglos'
-                        }
-                      }
-                    },
-                    comun: {
-                      summary: 'Resultado de contraseña común',
-                      value: {
-                        password_evaluada: '***********',
-                        resultado: {
-                          longitud: 11,
-                          keyspace: 36,
-                          entropia_bits: 28,
-                          entropia_original: 56.77,
-                          categoria: 'Insegura (Común)',
-                          en_diccionario: true,
-                          tiempo_estimado_crack: '42.95 minutos'
-                        }
-                      }
-                    }
                   }
                 }
               }
@@ -311,18 +300,16 @@ La API verifica:
       }
     }
   },
-  apis: [] // No necesitamos archivos ya que definimos todo en 'definition'
+  apis: []
 };
 
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 
-// Servir documentación Swagger
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
   customCss: '.swagger-ui .topbar { display: none }',
   customSiteTitle: 'API Password Evaluator',
 }));
 
-// Servir spec JSON
 app.get('/api-docs.json', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.send(swaggerSpec);
@@ -400,6 +387,41 @@ function humanize_time(seconds) {
   return `${value} ${unit.label}`;
 }
 
+// Nueva función: detectar palabras parciales del diccionario
+function findDictionaryWords(password) {
+  const passwordLower = password.toLowerCase();
+  const foundWords = [];
+  
+  // Buscar coincidencias exactas completas
+  if (passwordSet.has(passwordLower)) {
+    return { exact: true, words: [passwordLower] };
+  }
+  
+  // Buscar palabras del diccionario dentro de la contraseña (mínimo 4 caracteres)
+  for (const dictWord of passwordSet) {
+    if (dictWord.length >= 4 && passwordLower.includes(dictWord)) {
+      foundWords.push(dictWord);
+    }
+  }
+  
+  // Ordenar por longitud descendente (palabras más largas primero)
+  foundWords.sort((a, b) => b.length - a.length);
+  
+  // Eliminar palabras que son subcadenas de otras ya encontradas
+  const uniqueWords = [];
+  for (const word of foundWords) {
+    const isSubstring = uniqueWords.some(w => w.includes(word) && w !== word);
+    if (!isSubstring) {
+      uniqueWords.push(word);
+    }
+  }
+  
+  return { 
+    exact: false, 
+    words: uniqueWords 
+  };
+}
+
 function check_password_strength(password) {
   const { entropy, L, N } = calculate_entropy(password);
 
@@ -408,12 +430,26 @@ function check_password_strength(password) {
   else if (entropy < 80) category = 'Fuerte';
   else category = 'Muy Fuerte';
 
-  const inDictionary = passwordSet.has(password.toLowerCase());
+  // Detectar si está en el diccionario o contiene palabras del diccionario
+  const dictionaryCheck = findDictionaryWords(password);
+  const inDictionary = dictionaryCheck.exact;
+  const partiallyInDictionary = !dictionaryCheck.exact && dictionaryCheck.words.length > 0;
   
   let adjustedEntropy = entropy;
+  let originalEntropy = null;
+  
   if (inDictionary) {
     category = 'Insegura (Común)';
+    originalEntropy = entropy;
     adjustedEntropy = Math.min(entropy, 28);
+  } else if (partiallyInDictionary) {
+    // Penalizar proporcionalmente según cuántas palabras se encontraron
+    category = 'Insegura (Parcialmente común)';
+    originalEntropy = entropy;
+    
+    // Penalización: reducir 50% por cada palabra encontrada (máximo 80% de reducción)
+    const penaltyFactor = Math.min(0.8, dictionaryCheck.words.length * 0.5);
+    adjustedEntropy = entropy * (1 - penaltyFactor);
   }
 
   const crackSeconds = estimate_crack_time_seconds(adjustedEntropy);
@@ -422,9 +458,11 @@ function check_password_strength(password) {
     longitud: L,
     keyspace: N,
     entropia_bits: parseFloat(adjustedEntropy.toFixed(2)),
-    entropia_original: inDictionary ? parseFloat(entropy.toFixed(2)) : null,
+    entropia_original: originalEntropy ? parseFloat(originalEntropy.toFixed(2)) : null,
     categoria: category,
     en_diccionario: inDictionary,
+    parcialmente_en_diccionario: partiallyInDictionary,
+    palabras_encontradas: dictionaryCheck.words,
     tiempo_estimado_crack: humanize_time(crackSeconds)
   };
 }
@@ -466,7 +504,6 @@ app.get('/', (req, res) => {
   res.redirect('/api-docs');
 });
 
-// Manejo de rutas no encontradas
 app.use((req, res) => {
   res.status(404).json({ 
     error: 'Endpoint no encontrado',
