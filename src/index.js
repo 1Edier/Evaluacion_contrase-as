@@ -325,7 +325,7 @@ function loadDictionary() {
       .pipe(csv())
       .on('data', (row) => {
         const values = Object.values(row);
-        if (values[2]) {
+        if (values[1]) {
           set.add(String(values[1]).toLowerCase().trim());
         }
       })
